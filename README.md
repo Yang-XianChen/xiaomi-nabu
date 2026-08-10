@@ -1,10 +1,6 @@
 # xiaomi-nabu — Kernel 6.14.11 (audio fixes)
 
-Linux kernel and modules for the Xiaomi Pad 5 (nabu). This release is based on the stable **6.14.11** kernel with audio fixes. Kernel 6.17 is not deprecated, but the upstream 6.17 build could not be tested on my device; 6.14.11 is the tested release.
-
-## About kernel 6.17
-
-Kernel 6.17 is not deprecated. It is simply not the tested release here: the upstream 6.17 build does not run on my device, so it could not be tested. If it works on your device, you can still build it with the repository workflow.
+Linux kernel and modules for the Xiaomi Pad 5 (nabu). This release is based on the stable **6.14.11** kernel with audio fixes.
 
 ## Latest release
 
