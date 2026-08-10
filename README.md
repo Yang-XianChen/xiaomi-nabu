@@ -144,11 +144,22 @@ countdowns, charging override and automatic panel-recovery cycles.
 - Docs & source: [features/power-screen-toggle/](features/power-screen-toggle/)
 - Install on the device: `sudo bash features/power-screen-toggle/install.sh`
 
+## Companion feature: charge control
+
+`features/charge-control/` is an attached daily-use feature for the pad:
+a small Rust daemon that stops charging above 75% battery and resumes below
+50%, protecting the LN8000 charger and battery from staying at full charge
+for long periods.
+
+- Docs & source: [features/charge-control/](features/charge-control/)
+- Install on the device: `sudo bash features/charge-control/install.sh`
+
 ## Repository layout
 
 - `patches/` — kernel patches applied by the build workflow.
 - `kernel-build-files/` — extra kernel config and Debian `postinst`/`postrm` scripts.
 - `features/power-screen-toggle/` — companion daemon for power/lid screen toggle.
+- `features/charge-control/` — battery threshold charging daemon (LN8000, Rust).
 - `.github/workflows/build-kernel.yml` — builds the kernel `.deb`/`.tar` package.
 
 ## Older README

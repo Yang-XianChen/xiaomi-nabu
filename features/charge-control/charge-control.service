@@ -1,0 +1,12 @@
+[Unit]
+Description=Battery charge control (stop >75%, allow <50%)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/charge-control --stop 75 --start 50 --interval 20
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
