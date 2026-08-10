@@ -75,6 +75,33 @@ else
     cp "$OUTPUT_EFI" /boot/
 fi
 
+# 7. Apply user-space audio configuration (restored on removal)
+CONFIG_DIR="/var/lib/xiaomi-nabu-linux-6.14-audio-fixes"
+mkdir -p "$CONFIG_DIR"
+
+PULSE_CONF="/etc/pulse/daemon.conf"
+if [ -f "$PULSE_CONF" ] && ! grep -q '^default-fragment-size-msec[[:space:]]*=[[:space:]]*256' "$PULSE_CONF"; then
+    if [ ! -f "$CONFIG_DIR/daemon.conf.orig" ]; then
+        cp -a "$PULSE_CONF" "$CONFIG_DIR/daemon.conf.orig"
+    fi
+    if grep -q '^default-fragment-size-msec' "$PULSE_CONF"; then
+        sed -i 's/^default-fragment-size-msec.*/default-fragment-size-msec = 256/' "$PULSE_CONF"
+    elif grep -qE '^[;#][[:space:]]*default-fragment-size-msec' "$PULSE_CONF"; then
+        sed -i -E 's/^[;#][[:space:]]*default-fragment-size-msec.*/default-fragment-size-msec = 256/' "$PULSE_CONF"
+    else
+        echo 'default-fragment-size-msec = 256' >> "$PULSE_CONF"
+    fi
+    touch "$CONFIG_DIR/pulse.modified"
+    echo "Applied audio buffer: default-fragment-size-msec = 256"
+fi
+
+MODPROBE_CONF="/etc/modprobe.d/nabu-audio.conf"
+if [ ! -f "$MODPROBE_CONF" ]; then
+    echo 'options q6asm nabu_stream_gain_q13=4106' > "$MODPROBE_CONF"
+    touch "$CONFIG_DIR/nabu-modprobe.created"
+    echo "Applied persistent q6asm gain: nabu_stream_gain_q13=4106"
+fi
+
 # 7. Cleanup
 rm -rf "$MNT_TMP"
 rm -f "$OUTPUT_EFI"

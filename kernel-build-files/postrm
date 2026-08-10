@@ -52,6 +52,21 @@ if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
         echo "Post-remove: ESP not available. Could not delete EFI file (ignored)."
     fi
 
+    # 7. Restore user-space audio configuration
+    CONFIG_DIR="/var/lib/xiaomi-nabu-linux-6.14-audio-fixes"
+    if [ -f "$CONFIG_DIR/daemon.conf.orig" ]; then
+        cp -a "$CONFIG_DIR/daemon.conf.orig" /etc/pulse/daemon.conf
+        rm -f "$CONFIG_DIR/daemon.conf.orig"
+        echo "Post-remove: Restored /etc/pulse/daemon.conf"
+    fi
+    if [ -f "$CONFIG_DIR/nabu-modprobe.created" ]; then
+        rm -f /etc/modprobe.d/nabu-audio.conf
+        rm -f "$CONFIG_DIR/nabu-modprobe.created"
+        echo "Post-remove: Removed /etc/modprobe.d/nabu-audio.conf"
+    fi
+    rm -f "$CONFIG_DIR/pulse.modified"
+    rmdir "$CONFIG_DIR" 2>/dev/null || true
+
     # Cleanup temp directory
     rm -rf "$MNT_TMP"
 fi

@@ -66,6 +66,13 @@ This kernel includes these audio fixes:
 - CS35L41 PUP/PDN errors demoted from errors to warnings.
 - ASM stream master gain control (`nabu_stream_gain_q13`), default **-6 dB** to avoid DSP clipping.
 
+**Automatic configuration:** the `xiaomi-nabu-linux-6.14-audio-fixes` package applies these settings automatically on install:
+
+- Writes `options q6asm nabu_stream_gain_q13=4106` to `/etc/modprobe.d/nabu-audio.conf`
+- Sets `default-fragment-size-msec = 256` in `/etc/pulse/daemon.conf`
+
+Both are restored to their previous state when the package is removed or purged.
+
 ### Verify audio modules
 
 ```bash
