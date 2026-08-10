@@ -566,6 +566,37 @@ impl Daemon {
         }
     }
 
+    /// After an external unblank (e.g. GNOME idle-blank dismissed by keyboard
+    /// or mouse input), GNOME may leave the backlight at the idle-dim value
+    /// (or at 0) instead of the user's real brightness. Restore it without
+    /// doing a full screen-on sequence.
+    fn restore_brightness_if_stale(&mut self) {
+        if self.screen_off || self.display_blanked || self.user_brightness <= 0 {
+            return;
+        }
+        let Ok(current) = self.read_brightness() else {
+            return;
+        };
+        if current == self.user_brightness {
+            return;
+        }
+        let max = self.read_max_brightness();
+        let stale = if current <= 0 {
+            true
+        } else if let Some(d) = self.idle_dim_value() {
+            (current - d).abs() <= (max / 50).max(5)
+        } else {
+            current * 3 < self.user_brightness
+        };
+        if stale {
+            log(&format!(
+                "restoring user brightness {} (was {})",
+                self.user_brightness, current
+            ));
+            let _ = self.write_brightness(self.user_brightness);
+        }
+    }
+
     fn write_brightness(&self, value: i64) -> io::Result<()> {
         // Keep Mutter's Backlight property in sync so the GNOME brightness
         // slider shows the real value. Mutter rejects values below its
@@ -1198,9 +1229,13 @@ impl Daemon {
             return true; // lid closed: keyboard must not wake the screen
         }
         for ev in events {
-            if ev.event_type == EV_KEY && ev.value == 1 && !self.screen_visibly_on() {
-                log("keyboard wake");
-                self.turn_on();
+            if ev.event_type == EV_KEY && ev.value == 1 {
+                if self.screen_visibly_on() {
+                    self.restore_brightness_if_stale();
+                } else {
+                    log("keyboard wake");
+                    self.turn_on();
+                }
             }
         }
         true
@@ -1231,9 +1266,13 @@ impl Daemon {
                 break;
             }
         }
-        if wake && !self.screen_visibly_on() {
-            log(&format!("pointer wake ({})", path));
-            self.turn_on();
+        if wake {
+            if self.screen_visibly_on() {
+                self.restore_brightness_if_stale();
+            } else {
+                log(&format!("pointer wake ({})", path));
+                self.turn_on();
+            }
         }
         true
     }
@@ -1785,6 +1824,7 @@ fn main() {
                     daemon.turn_on();
                 } else {
                     log("display unblanked externally; refreshing input devices");
+                    daemon.restore_brightness_if_stale();
                     let touch_props = POINTER_PROPS_TOUCH.to_vec();
                     let other_props = POINTER_PROPS_OTHER.to_vec();
                     thread::spawn(move || {

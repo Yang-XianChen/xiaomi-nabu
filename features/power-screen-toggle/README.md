@@ -88,6 +88,9 @@ gsettings set org.gnome.settings-daemon.plugins.power lid-close-battery-action n
 - **Screen-on reliability:** the compositor unblank is retried and verified
   against the real DPMS state; if it fails, the screen stays marked off and
   the next event retries.
+- **External-wake brightness:** when a GNOME idle-blank is dismissed by
+  keyboard/mouse input, GNOME can leave the backlight at the auto-dim level
+  (or at 0); the daemon detects this and restores the user's real brightness.
 - **Panel recovery:** after a system resume the first screen-on runs one
   full blank/unblank cycle (backlight kept at 0); if the kernel logs an
   explicit init failure, up to two additional recovery cycles are attempted.
