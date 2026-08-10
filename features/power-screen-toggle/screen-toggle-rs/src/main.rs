@@ -93,9 +93,11 @@ type NfdsT = usize;
 
 const O_RDONLY: c_int = 0;
 const O_NONBLOCK: c_int = 0o4000;
+const O_CLOEXEC: c_int = 0o2000000;
 const POLLIN: c_short = 0x0001;
 const POLLERR: c_short = 0x0008;
 const POLLHUP: c_short = 0x0010;
+const POLLNVAL: c_short = 0x0020;
 
 const SIGUSR1: c_int = 10;
 const SIGTERM: c_int = 15;
@@ -197,8 +199,12 @@ fn local_tm(secs: TimeT) -> Tm {
 }
 
 fn format_epoch(epoch: f64) -> String {
-    let secs = epoch.floor() as TimeT;
-    let millis = ((epoch - epoch.floor()) * 1000.0).round() as i64;
+    let mut secs = epoch.floor() as TimeT;
+    let mut millis = ((epoch - epoch.floor()) * 1000.0).round() as i64;
+    if millis >= 1000 {
+        secs += 1;
+        millis -= 1000;
+    }
     let tm = local_tm(secs);
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
@@ -314,7 +320,7 @@ fn run_cmd_impl(cmd: &[&str], as_user: Option<(&str, u32)>, secs: u64) -> Option
 fn open_nonblocking(path: &str) -> io::Result<RawFd> {
     let cpath = CString::new(path)
         .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "path contains NUL"))?;
-    let fd = unsafe { open(cpath.as_ptr(), O_RDONLY | O_NONBLOCK) };
+    let fd = unsafe { open(cpath.as_ptr(), O_RDONLY | O_NONBLOCK | O_CLOEXEC) };
     if fd < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -437,6 +443,8 @@ struct Daemon {
     screen_off_at: f64,
     last_blank_change: f64,
     input_snapshot: String,
+    inputs_initialized: bool,
+    input_scan_needed: bool,
 }
 
 impl Daemon {
@@ -468,6 +476,8 @@ impl Daemon {
             screen_off_at: 0.0,
             last_blank_change: 0.0,
             input_snapshot: String::new(),
+            inputs_initialized: false,
+            input_scan_needed: false,
         }
     }
 
@@ -719,28 +729,32 @@ impl Daemon {
                 }
             }
         }
-        if self.keyboard_fds.is_empty() {
+        if !self.inputs_initialized {
             self.open_keyboard_devices();
-        }
-        if self.pointer_fds.is_empty() {
             self.open_pointer_devices();
+            self.inputs_initialized = true;
         }
     }
 
-    fn turn_off(&mut self) {
+    fn turn_off(&mut self) -> bool {
         if self.backlight.is_none() {
-            return;
+            return false;
         }
         let brightness = self.read_brightness().unwrap_or(0);
         if self.screen_off && self.display_blanked && brightness == 0 {
-            return; // already fully off
+            return true; // already fully off
         }
         // Use the tracked user brightness; the current sysfs value may be
         // GNOME's idle-dim level and must not overwrite the real setting.
         let preferred = if self.user_brightness > 0 {
             self.user_brightness
         } else {
-            best_user_brightness()
+            let best = best_user_brightness();
+            if best > 0 {
+                best
+            } else {
+                self.read_brightness().unwrap_or(0)
+            }
         };
         set_power_save(true);
         if preferred > 0 {
@@ -748,12 +762,13 @@ impl Daemon {
         }
         if let Err(e) = self.write_brightness(0) {
             log(&format!("failed to turn off backlight: {}", e));
-            return;
+            return false;
         }
         self.screen_off = true;
         self.display_blanked = true;
         self.screen_off_at = now_secs();
         log("screen off");
+        true
     }
 
     fn start_suspend_timer(&mut self, delay_secs: f64, reason: &'static str) {
@@ -796,7 +811,7 @@ impl Daemon {
             "suspend countdown expired ({}), suspending system",
             reason
         ));
-        match run_cmd(&["systemctl", "suspend"], 0) {
+        match run_cmd(&["systemctl", "suspend"], 60) {
             Some(res) if res.ok => {
                 self.just_resumed = true;
                 log("system resumed after countdown suspend");
@@ -818,6 +833,7 @@ impl Daemon {
             return;
         }
         if !self.screen_off && !self.display_blanked && self.read_brightness().unwrap_or(0) > 0 {
+            self.just_resumed = false;
             return; // already fully on
         }
         self.last_own_unblank = now_secs();
@@ -846,7 +862,6 @@ impl Daemon {
         // flight, and starting the window afterwards would miss it.
         let init_start = now_secs();
         let force_recovery = self.just_resumed;
-        self.just_resumed = false;
         let mut pw_ok = false;
         if force_recovery {
             // After a system resume the panel can stay black even when the
@@ -889,6 +904,20 @@ impl Daemon {
         }
         let t_settle = Instant::now();
         thread::sleep(Duration::from_millis(DISPLAY_SETTLE_MS));
+        // A gdbus success does not guarantee that the compositor actually
+        // reached DPMS On; verify the real state before restoring brightness.
+        self.update_display_state();
+        match self.read_dpms().as_deref() {
+            Some("On") => {}
+            Some(_) => {
+                pw_ok = false;
+                log("compositor did not reach DPMS On after settle; keeping screen off");
+            }
+            None => {}
+        }
+        if !pw_ok {
+            return;
+        }
         let kernel_failed = kernel_init_failed_since(init_start);
         if force_recovery {
             if kernel_failed
@@ -960,6 +989,10 @@ impl Daemon {
             set_power_save(false);
             self.update_display_state();
         }
+        match self.read_dpms().as_deref() {
+            Some("On") | None => self.just_resumed = false,
+            Some(_) => {}
+        }
     }
 
     /// Current lid switch state from the kernel, falling back to the last
@@ -999,7 +1032,7 @@ impl Daemon {
             // Closing the lid after a suspend must not light the screen:
             // blank it and go straight back to sleep, with loop protection.
             log("resume: lid is closed, keeping screen off");
-            self.turn_off();
+            let _ = self.turn_off();
             if is_charging() {
                 log("resume: lid closed but system is charging, keeping screen off (no re-suspend)");
                 return;
@@ -1015,7 +1048,7 @@ impl Daemon {
                     "resume: lid-close wake, re-suspending (attempt {}/{})",
                     self.resuspend_count, MAX_LID_RESUSPENDS
                 ));
-                match run_cmd(&["systemctl", "suspend"], 0) {
+                match run_cmd(&["systemctl", "suspend"], 60) {
                     Some(res) if res.ok => {
                         self.just_resumed = true;
                         log("system resumed after lid-close re-suspend");
@@ -1036,6 +1069,9 @@ impl Daemon {
             self.turn_on(); // also refreshes touch/pointer devices
         } else {
             self.screen_off = false;
+            // The display is already visibly on, so no forced recovery cycle
+            // is needed on a later manual toggle.
+            self.just_resumed = false;
             // The compositor may have already restored the display during
             // wake, so turn_on() was skipped; refresh input devices anyway,
             // otherwise the touchscreen mapping can stay stale.
@@ -1085,11 +1121,13 @@ impl Daemon {
     /// (e.g. a Bluetooth keyboard/mouse that paired after boot).
     fn rescan_input_devices(&mut self) {
         // Only pay for the udevadm scans when the set of event nodes actually
-        // changed; a plain directory read is far cheaper.
+        // changed or a watched fd disappeared; a plain directory read is far
+        // cheaper.
         let snapshot = input_events_snapshot();
-        if snapshot == self.input_snapshot {
+        if snapshot == self.input_snapshot && !self.input_scan_needed {
             return;
         }
+        self.input_scan_needed = false;
         self.input_snapshot = snapshot;
         let keyboard_paths = find_keyboard_paths();
         self.keyboard_fds.retain(|(fd, path)| {
@@ -1137,6 +1175,7 @@ impl Daemon {
                 }
             }
         }
+        self.inputs_initialized = true;
     }
 
     /// Drain pending events from an input fd.
@@ -1150,6 +1189,9 @@ impl Daemon {
                 let err = io::Error::last_os_error();
                 if err.kind() == ErrorKind::WouldBlock {
                     break;
+                }
+                if err.kind() == ErrorKind::Interrupted {
+                    continue;
                 }
                 return Err(());
             }
@@ -1188,14 +1230,19 @@ impl Daemon {
                     self.last_toggle = now;
                     log("power key pressed");
                     if self.screen_visibly_on() {
-                        self.turn_off();
-                        self.start_suspend_timer(POWER_SUSPEND_DELAY_SECS, "power button");
+                        if self.turn_off() {
+                            self.start_suspend_timer(POWER_SUSPEND_DELAY_SECS, "power button");
+                        }
                         // Allow an immediate re-press to wake: the 1 s
                         // debounce exists to stop a double-tap from turning
                         // the screen off, not to block waking it back up.
                         self.last_toggle = 0.0;
                     } else {
+                        let was_off = !self.screen_visibly_on();
                         self.turn_on();
+                        if was_off && self.screen_visibly_on() {
+                            self.last_toggle = now_secs();
+                        }
                     }
                 }
             } else if ev.event_type == EV_SW && ev.code == SW_LID && Some(ev.value) != self.last_lid
@@ -1208,8 +1255,7 @@ impl Daemon {
                         // with its 15 s countdown); closing the lid should not
                         // restart the screen-off flow or extend the deadline.
                         log("lid closed while a suspend countdown is active, keeping existing countdown");
-                    } else {
-                        self.turn_off();
+                    } else if self.turn_off() {
                         self.start_suspend_timer(LID_SUSPEND_DELAY_SECS, "lid close");
                     }
                 } else if ev.value == 0 {
@@ -1227,6 +1273,7 @@ impl Daemon {
         let events = match self.drain_events(fd) {
             Ok(e) => e,
             Err(()) => {
+                self.input_scan_needed = true;
                 log(&format!("keyboard device {} disappeared", path));
                 return false;
             }
@@ -1251,6 +1298,7 @@ impl Daemon {
         let events = match self.drain_events(fd) {
             Ok(e) => e,
             Err(()) => {
+                self.input_scan_needed = true;
                 log(&format!("pointer device {} disappeared", path));
                 return false;
             }
@@ -1827,7 +1875,7 @@ fn main() {
                     // though the lid is closed; keep it off instead of
                     // treating this as a user screen-on request.
                     log("external unblank ignored (lid closed); keeping screen off");
-                    daemon.turn_off();
+                    let _ = daemon.turn_off();
                 } else if daemon.screen_off {
                     log("display unblanked externally; turning screen on");
                     daemon.turn_on();
@@ -1848,8 +1896,7 @@ fn main() {
         if daemon.power_fd.is_none()
             || daemon.lid_fd.is_none()
             || daemon.backlight.is_none()
-            || daemon.keyboard_fds.is_empty()
-            || daemon.pointer_fds.is_empty()
+            || !daemon.inputs_initialized
         {
             daemon.setup();
         }
@@ -1902,7 +1949,7 @@ fn main() {
             continue;
         }
         for pfd in &pollfds {
-            if pfd.revents & (POLLIN | POLLERR | POLLHUP) == 0 {
+            if pfd.revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL) == 0 {
                 continue;
             }
             if Some(pfd.fd) == daemon.power_fd {
