@@ -111,9 +111,7 @@ If you prefer a graphical interface, you can use the Arkt-7 web tool at [arkt-7.
 
 ## ⚠️ Troubleshooting & Known-issues
 
-*   **Kernel Boot Issues:** **Kernel 6.17** does not boot reliably on all devices, particularly those with **Samsung UFS** drives.
-	If screen stays black for more than 30 seconds, hold power button until tablet reboots. Try several times. If it consistently fails,
-	use **Kernel 6.14.11** which boots on every tablet.
+*   **Kernel:** **Kernel 6.17 is deprecated.** Use **Kernel 6.14.11**, which boots on every tablet.
 *   **Files app:** long-tap on folder opens context-menue but long-tap on background not -> use mouse for right-click or terminal to create new folders with `mkdir folder_name`.
 *   **Suspend:** Screen sometimes does not turn on again after Suspend.
 ---
@@ -156,10 +154,6 @@ After booting Ubuntu and doing the initial setup connect to the internet (if you
 
 **Using the Xiaomi pen**
 *  The pen should work without any further action.
-*  [Kernel 6.17 only] To activate charging of pen open terminal and run `sudo modprobe idtp9418`. Tip of pen should point to left.
-*  [Kernel 6.17 only] To make activation permanent run `echo idtp9418 | sudo tee /etc/modules-load.d/charge-stylus.conf`.
-*  [Kernel 6.17 only] To control charging state open Bluetooth settings, long-press one of the pen buttons until "Xiaomi Smart Pen" appears in Bluetooth settings.
-   Connect pen. Now change to 'Energy' setting. Under 'Connected Devices' it should show charging state.
 ---
 
 ## Credits

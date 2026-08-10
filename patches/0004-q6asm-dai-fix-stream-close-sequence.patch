@@ -1,0 +1,153 @@
+diff --git a/sound/soc/qcom/qdsp6/q6asm-dai.c b/sound/soc/qcom/qdsp6/q6asm-dai.c
+--- a/sound/soc/qcom/qdsp6/q6asm-dai.c
++++ b/sound/soc/qcom/qdsp6/q6asm-dai.c
+@@ -209,6 +209,19 @@
+ 	}
+ }
+ 
++static int q6asm_dai_close_stream(struct q6asm_dai_rtd *prtd)
++{
++	int ret, i;
++
++	for (i = 0; i < 50; i++) {
++		ret = q6asm_cmd(prtd->audio_client, prtd->stream_id, CMD_CLOSE);
++		if (!ret)
++			return 0;
++		usleep_range(9000, 11000);
++	}
++	return ret;
++}
++
+ static int q6asm_dai_prepare(struct snd_soc_component *component,
+ 			     struct snd_pcm_substream *substream)
+ {
+@@ -232,13 +245,24 @@
+ 	prtd->pcm_count = snd_pcm_lib_period_bytes(substream);
+ 	prtd->pcm_irq_pos = 0;
+ 	/* rate and channels are sent to audio driver */
+-	if (prtd->state) {
++	if (prtd->session_id != 0) {
+ 		/* clear the previous setup if any  */
+-		q6asm_cmd(prtd->audio_client, prtd->stream_id, CMD_CLOSE);
+-		q6asm_unmap_memory_regions(substream->stream,
+-					   prtd->audio_client);
++		ret = q6asm_dai_close_stream(prtd);
++		if (ret < 0) {
++			dev_err(dev, "Failed to close q6asm stream %d\n", prtd->stream_id);
++			return ret;
++		}
++
++		ret = q6asm_unmap_memory_regions(substream->stream, prtd->audio_client);
++		if (ret < 0) {
++			dev_err(dev, "Failed to unmap memory regions for q6asm stream %d\n",
++				prtd->stream_id);
++			return ret;
++		}
++
+ 		q6routing_stream_close(soc_prtd->dai_link->id,
+ 					 substream->stream);
++		prtd->state = Q6ASM_STREAM_STOPPED;
+ 	}
+ 
+ 	ret = q6asm_map_memory_regions(substream->stream, prtd->audio_client,
+@@ -303,8 +327,6 @@
+ 	q6asm_cmd(prtd->audio_client, prtd->stream_id,  CMD_CLOSE);
+ open_err:
+ 	q6asm_unmap_memory_regions(substream->stream, prtd->audio_client);
+-	q6asm_audio_client_free(prtd->audio_client);
+-	prtd->audio_client = NULL;
+ 
+ 	return ret;
+ }
+@@ -437,12 +459,23 @@
+ 	struct q6asm_dai_rtd *prtd = runtime->private_data;
+ 
+ 	if (prtd->audio_client) {
+-		if (prtd->state)
+-			q6asm_cmd(prtd->audio_client, prtd->stream_id,
+-				  CMD_CLOSE);
++		bool opened = (prtd->session_id != 0);
++
++		/* Stop accepting writes immediately; WRITE_DONE events
++		 * arriving during close must not submit new buffers.
++		 */
++		prtd->state = Q6ASM_STREAM_STOPPED;
+ 
+-		q6asm_unmap_memory_regions(substream->stream,
++		/* If the ASM session was opened on the DSP side it must be
++		 * closed even after EOS, otherwise the session leaks and
++		 * subsequent OPENs fail with DSP error 9. Skip only if the
++		 * stream was never opened (prepare never succeeded).
++		 */
++		if (opened) {
++			q6asm_dai_close_stream(prtd);
++			q6asm_unmap_memory_regions(substream->stream,
+ 					   prtd->audio_client);
++		}
+ 		q6asm_audio_client_free(prtd->audio_client);
+ 		prtd->audio_client = NULL;
+ 	}
+@@ -535,8 +568,6 @@
+ 			snd_compr_drain_notify(prtd->cstream);
+ 			prtd->notify_on_drain = false;
+ 
+-		} else {
+-			prtd->state = Q6ASM_STREAM_STOPPED;
+ 		}
+ 		spin_unlock_irqrestore(&prtd->lock, flags);
+ 		break;
+@@ -659,7 +690,7 @@
+ 	struct snd_soc_pcm_runtime *rtd = stream->private_data;
+ 
+ 	if (prtd->audio_client) {
+-		if (prtd->state) {
++		if (prtd->state == Q6ASM_STREAM_RUNNING) {
+ 			q6asm_cmd(prtd->audio_client, prtd->stream_id,
+ 				  CMD_CLOSE);
+ 			if (prtd->next_track_stream_id) {
+@@ -667,11 +698,11 @@
+ 					  prtd->next_track_stream_id,
+ 					  CMD_CLOSE);
+ 			}
+-		}
+ 
+-		snd_dma_free_pages(&prtd->dma_buffer);
+-		q6asm_unmap_memory_regions(stream->direction,
++			q6asm_unmap_memory_regions(stream->direction,
+ 					   prtd->audio_client);
++		}
++		snd_dma_free_pages(&prtd->dma_buffer);
+ 		q6asm_audio_client_free(prtd->audio_client);
+ 		prtd->audio_client = NULL;
+ 	}
+@@ -901,7 +932,7 @@
+ 			      prtd->session_id, dir);
+ 	if (ret) {
+ 		dev_err(dev, "Stream reg failed ret:%d\n", ret);
+-		goto q6_err;
++		goto routing_err;
+ 	}
+ 
+ 	ret = __q6asm_dai_compr_set_codec_params(component, stream,
+@@ -927,11 +958,11 @@
+ 	return 0;
+ 
+ q6_err:
++	q6routing_stream_close(rtd->dai_link->id, dir);
++routing_err:
+ 	q6asm_cmd(prtd->audio_client, prtd->stream_id, CMD_CLOSE);
+ 
+ open_err:
+-	q6asm_audio_client_free(prtd->audio_client);
+-	prtd->audio_client = NULL;
+ 	return ret;
+ }
+ 
+@@ -999,7 +1030,6 @@
+ 				       0, 0, 0);
+ 		break;
+ 	case SNDRV_PCM_TRIGGER_STOP:
+-		prtd->state = Q6ASM_STREAM_STOPPED;
+ 		ret = q6asm_cmd_nowait(prtd->audio_client, prtd->stream_id,
+ 				       CMD_EOS);
+ 		break;

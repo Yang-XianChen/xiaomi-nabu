@@ -105,7 +105,6 @@ jobs:
           apt install -y systemd-boot-efi systemd-ukify 
           apt install -y xiaomi-nabu-alsa xiaomi-nabu-firmware
           apt install -y xiaomi-nabu-linux-6.14
-          apt install -y xiaomi-nabu-linux-6.17
           apt install -y zram-config
           apt install -y $EXTRA_PACKAGES
           apt --fix-broken install -y

@@ -6,11 +6,11 @@ on:
       branch:
         description: 'Kernel branch to build'
         required: true
-        default: 'sm8150/6.17'
+        default: 'sm8150/6.14.11'
       patch_suffix:
         description: 'Suffix added to artifact names and kernel localversion when patches are applied (e.g., -UFS-patch)'
         required: false
-        default: '-UFS-slowdown'
+        default: '-nabu-fixes'
       cmdline:
         description: 'Kernel command line (root=... will be duplicated with "2" appended for second EFI)'
         required: false
