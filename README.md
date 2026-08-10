@@ -2,13 +2,11 @@
 
 Linux kernel and modules for the Xiaomi Pad 5 (nabu). This release is based on the stable **6.14.11** kernel with audio fixes.
 
-## Latest releases
+## Latest release
 
 - **Audio-fixes kernel (recommended for testing):** `6.14.11-xiaomi-nabu-tmm-audio-fixes`
   - Independent boot entry: `6.14.11-audio-fixes`
   - Package: `xiaomi-nabu-linux-6.14-audio-fixes_6.14.11-xiaomi-nabu-tmm-audio-fixes_arm64.deb`
-- **Original 6.14.11 kernel:** `6.14.11-nabu-tmm+`
-  - Package: `xiaomi-nabu-linux-6.14_6.14.11-nabu-tmm+_arm64.deb`
 - Download: <https://github.com/Yang-XianChen/xiaomi-nabu/releases/latest>
 
 ## Apply the audio-fixes kernel
