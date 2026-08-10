@@ -435,6 +435,7 @@ struct Daemon {
     last_input_rescan: f64,
     screen_on_at: f64,
     screen_off_at: f64,
+    last_blank_change: f64,
     input_snapshot: String,
 }
 
@@ -465,6 +466,7 @@ impl Daemon {
             last_input_rescan: 0.0,
             screen_on_at: 0.0,
             screen_off_at: 0.0,
+            last_blank_change: 0.0,
             input_snapshot: String::new(),
         }
     }
@@ -582,6 +584,10 @@ impl Daemon {
         }
         let max = self.read_max_brightness();
         let stale = if current <= 0 {
+            true
+        } else if now_secs() - self.last_blank_change < 3.0 {
+            // Just woke from a blank/unblank transition: trust the tracked
+            // user brightness and correct whatever GNOME left behind.
             true
         } else if let Some(d) = self.idle_dim_value() {
             (current - d).abs() <= (max / 50).max(5)
@@ -1170,8 +1176,8 @@ impl Daemon {
                     // A press queued while turn_on() was still running (slow
                     // panel recovery) must not toggle the screen back off.
                     let ev_time = ev.time_sec as f64 + ev.time_usec as f64 / 1_000_000.0;
-                    if self.screen_visibly_on() && ev_time < self.screen_on_at - 0.2 {
-                        log("power key ignored (stale press while screen was waking)");
+                    if self.screen_visibly_on() && ev_time < self.screen_on_at + 1.0 {
+                        log("power key ignored (press while screen was waking)");
                         continue;
                     }
                     let now = now_secs();
@@ -1812,6 +1818,9 @@ fn main() {
         }
         let blanked = daemon.display_blanked;
         if let Some(prev) = last_blanked {
+            if prev != blanked {
+                daemon.last_blank_change = now_secs();
+            }
             if prev && !blanked && now_secs() - daemon.last_own_unblank > 3.0 {
                 if daemon.lid_closed() == Some(true) {
                     // The compositor may unblank the display during wake even
@@ -1884,7 +1893,11 @@ fn main() {
             continue;
         }
 
-        let ready = unsafe { poll(pollfds.as_mut_ptr(), pollfds.len(), 500) };
+        // Poll faster only while the display is blanked, so an external wake
+        // (GNOME dismissing its idle blank) is noticed sooner. 5 Hz vs 2 Hz
+        // of a single poll() syscall; negligible overhead.
+        let poll_timeout = if daemon.display_blanked { 200 } else { 500 };
+        let ready = unsafe { poll(pollfds.as_mut_ptr(), pollfds.len(), poll_timeout) };
         if ready <= 0 {
             continue;
         }
