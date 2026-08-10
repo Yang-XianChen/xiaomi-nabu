@@ -32,7 +32,17 @@ uname -r
 # expected output: 6.14.11-nabu-tmm
 ```
 
-The package's `postinst` script automatically builds the UKI EFI file and copies it to the ESP partition. If you use a boot manager, select the new kernel entry after reboot.
+### What happens during installation
+
+The package's `postinst` script:
+
+1. Builds a new UKI EFI file for this kernel.
+2. Mounts the ESP partition and copies the new `.efi` file to `EFI/ubuntu/`.
+3. Does **not** delete or modify existing boot files.
+
+Old `6.14.11` and `6.17` boot entries remain unchanged; the new kernel appears as an additional entry. If the ESP cannot be mounted, the script falls back to copying the `.efi` file to `/boot` instead.
+
+If you use a boot manager, select the new kernel entry after reboot.
 
 ### Rollback
 
@@ -78,6 +88,27 @@ sudo reboot
 ```
 
 If you still hear clipping, lower the value further (e.g. `3500` ≈ -7.4 dB) or use Easy Effects with a limiter, which addresses level-dependent clipping in the DSP path.
+
+### Audio buffer configuration
+
+If you hear crackling, dropouts or underruns, increase the audio buffer. Edit `/etc/pulse/daemon.conf` (or `~/.config/pulse/daemon.conf`):
+
+```ini
+default-fragments = 4
+default-fragment-size-msec = 256
+```
+
+Available values: `128` ms, `256` ms, `512` ms. `256` ms or `512` ms are recommended for stability.
+
+**Note:** a larger buffer makes audio more stable but also increases audio latency.
+
+Restart the audio server (or reboot):
+
+```bash
+pulseaudio -k
+# or, on PipeWire systems:
+systemctl --user restart pipewire-pulse
+```
 
 ### If there is no sound at all
 
