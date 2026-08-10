@@ -365,6 +365,26 @@ impl Ln8000 {
     }
 }
 
+fn power_available(cfg: &Config) -> (bool, String) {
+    if read_sysfs(&cfg.charger_psy.join("present")).as_deref() == Some("1") {
+        return (true, format!("{} present=1", cfg.charger_psy.display()));
+    }
+    let base = Path::new("/sys/class/power_supply");
+    if let Ok(entries) = fs_entries(base) {
+        for name in entries {
+            let psy = base.join(&name);
+            let ty = read_sysfs(&psy.join("type")).unwrap_or_default();
+            if ty != "USB" && ty != "Mains" {
+                continue;
+            }
+            if read_sysfs(&psy.join("online")).as_deref() == Some("1") {
+                return (true, format!("{} online=1", psy.display()));
+            }
+        }
+    }
+    (false, "无电源接入".to_string())
+}
+
 fn print_status(cfg: &Config) -> Result<(), String> {
     let mut ln = Ln8000::open(&cfg.i2c_dev, cfg.i2c_addr)
         .map_err(|e| format!("打开 {} 失败: {}", cfg.i2c_dev, e))?;
@@ -383,8 +403,11 @@ fn print_status(cfg: &Config) -> Result<(), String> {
     println!("  状态    : {}", get("status"));
     println!("  电流    : {} uA", get("current_now"));
     println!("充电器  : {}", cfg.charger_psy.display());
+    let (power_ok, power_src) = power_available(cfg);
     println!("  接入    : {}", getc("present"));
     println!("  状态    : {}", getc("status"));
+    println!("  电源可用: {}", if power_ok { "是" } else { "否" });
+    println!("  来源    : {}", power_src);
     println!("SYS_STS : 0x{:02X} -> {}", sts, mode_name(sts));
     println!(
         "SYS_CTRL: 0x{:02X} -> {}",
@@ -398,10 +421,10 @@ fn print_status(cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
-fn decide(cfg: &Config, cap: i32, present: &str) -> Option<&'static str> {
+fn decide(cfg: &Config, cap: i32, power_ok: bool) -> Option<&'static str> {
     if cap > cfg.stop {
         Some("stop")
-    } else if cap < cfg.start && present == "1" {
+    } else if cap < cfg.start && power_ok {
         Some("allow")
     } else {
         None
@@ -416,8 +439,8 @@ fn desired_ctrl(cur: u8, action: &str) -> u8 {
     }
 }
 
-fn enforce(cfg: &Config, ln: &mut Ln8000, cap: i32, present: &str, reason: &str) {
-    let action = match decide(cfg, cap, present) {
+fn enforce(cfg: &Config, ln: &mut Ln8000, cap: i32, power_ok: bool, reason: &str) {
+    let action = match decide(cfg, cap, power_ok) {
         Some(a) => a,
         None => {
             debug(
@@ -427,8 +450,8 @@ fn enforce(cfg: &Config, ln: &mut Ln8000, cap: i32, present: &str, reason: &str)
             return;
         }
     };
-    if action == "allow" && present != "1" {
-        info(&format!("电量 {}% < {}%，但充电器未接入，跳过", cap, cfg.start));
+    if action == "allow" && !power_ok {
+        info(&format!("电量 {}% < {}%，但电源未接入，跳过", cap, cfg.start));
         return;
     }
     let cur = match ln.sys_ctrl() {
@@ -474,14 +497,14 @@ fn enforce(cfg: &Config, ln: &mut Ln8000, cap: i32, present: &str, reason: &str)
 }
 
 fn restore_charging(cfg: &Config, ln: &mut Ln8000) {
-    let present = read_sysfs(&cfg.charger_psy.join("present"));
-    if present.as_deref() == Some("1") {
+    let (power_ok, power_src) = power_available(cfg);
+    if power_ok {
         match ln.set_charging(true) {
             Ok(new) => info(&format!("收到退出信号，已恢复允许充电（SYS_CTRL=0x{:02X}）", new)),
             Err(e) => error(&format!("退出时恢复充电失败: {}", e)),
         }
     } else {
-        info("收到退出信号，充电器未接入，不干预");
+        info(&format!("收到退出信号，电源未接入（{}），不干预", power_src));
     }
 }
 
@@ -536,8 +559,7 @@ fn main() {
         libc::signal(libc::SIGINT, handle_signal as *const () as libc::sighandler_t);
     }
 
-    let present_path = cfg.charger_psy.join("present");
-    let mut last_present: Option<String> = None;
+    let mut last_power: Option<bool> = None;
     let mut last_cap_check: Option<Instant> = None;
 
     loop {
@@ -550,25 +572,25 @@ fn main() {
             break;
         }
 
-        let present = read_sysfs(&present_path);
-        if present.is_none() {
-            error("读取充电器接入状态失败，保持上次状态");
-        }
+        let (power_ok, power_src) = power_available(&cfg);
 
-        // 充电器插拔：驱动会立即恢复/停止充电，这里尽快重新断言
-        if last_present.is_some() && present != last_present {
-            info(&format!(
-                "充电器接入状态变化: {} -> {}",
-                last_present.as_deref().unwrap_or("?"),
-                present.as_deref().unwrap_or("?")
-            ));
-            let cap = read_capacity(&cfg.battery);
-            if cap < 0 {
-                error("读取电量失败，等待下个周期重试");
-            } else {
-                enforce(&cfg, &mut ln, cap, present.as_deref().unwrap_or(""), "充电器插拔");
+        // 电源插拔：驱动可能漏记 ln8000 present，综合 present 与 USB/Mains online 判断
+        if let Some(last_ok) = last_power {
+            if last_ok != power_ok {
+                info(&format!(
+                    "电源接入状态变化: {} -> {}（{}）",
+                    if last_ok { "已接入" } else { "未接入" },
+                    if power_ok { "已接入" } else { "未接入" },
+                    power_src
+                ));
+                let cap = read_capacity(&cfg.battery);
+                if cap < 0 {
+                    error("读取电量失败，等待下个周期重试");
+                } else {
+                    enforce(&cfg, &mut ln, cap, power_ok, "电源插拔");
+                }
+                last_cap_check = Some(Instant::now());
             }
-            last_cap_check = Some(Instant::now());
         }
 
         let do_cap_check = match last_cap_check {
@@ -580,12 +602,12 @@ fn main() {
             if cap < 0 {
                 error("读取电量失败，等待下个周期重试");
             } else {
-                enforce(&cfg, &mut ln, cap, present.as_deref().unwrap_or(""), "周期检查");
+                enforce(&cfg, &mut ln, cap, power_ok, "周期检查");
             }
             last_cap_check = Some(Instant::now());
         }
 
-        last_present = present;
+        last_power = Some(power_ok);
         if cfg.once {
             break;
         }
