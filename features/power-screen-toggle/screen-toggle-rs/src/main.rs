@@ -55,6 +55,10 @@ const LID_SUSPEND_DELAY_SECS: f64 = 1800.0;
 // How often to rescan input devices so keyboards/mice that connect later
 // (e.g. Bluetooth) are picked up for wake.
 const INPUT_RESCAN_INTERVAL_SECS: f64 = 3.0;
+// Ignore pointer wake for a short window after the daemon itself turns the
+// screen off: the user is often still holding/moving the mouse while pressing
+// the power button, and that movement must not instantly re-wake the screen.
+const POINTER_WAKE_COOLDOWN_SECS: f64 = 2.0;
 // Lid-close wake loop protection: re-suspend at most this many times inside
 // one window, then stay awake with the screen off.
 const MAX_LID_RESUSPENDS: u32 = 3;
@@ -430,6 +434,7 @@ struct Daemon {
     pointer_fds: Vec<(RawFd, String)>,
     last_input_rescan: f64,
     screen_on_at: f64,
+    screen_off_at: f64,
     input_snapshot: String,
 }
 
@@ -459,6 +464,7 @@ impl Daemon {
             pointer_fds: Vec::new(),
             last_input_rescan: 0.0,
             screen_on_at: 0.0,
+            screen_off_at: 0.0,
             input_snapshot: String::new(),
         }
     }
@@ -709,6 +715,7 @@ impl Daemon {
         }
         self.screen_off = true;
         self.display_blanked = true;
+        self.screen_off_at = now_secs();
         log("screen off");
     }
 
@@ -1146,6 +1153,10 @@ impl Daemon {
                     if self.screen_visibly_on() {
                         self.turn_off();
                         self.start_suspend_timer(POWER_SUSPEND_DELAY_SECS, "power button");
+                        // Allow an immediate re-press to wake: the 1 s
+                        // debounce exists to stop a double-tap from turning
+                        // the screen off, not to block waking it back up.
+                        self.last_toggle = 0.0;
                     } else {
                         self.turn_on();
                     }
@@ -1206,13 +1217,16 @@ impl Daemon {
         if self.lid_closed() == Some(true) {
             return true; // lid closed: pointer must not wake the screen
         }
+        if now_secs() - self.screen_off_at < POINTER_WAKE_COOLDOWN_SECS {
+            return true; // screen was just turned off; ignore pointer wake
+        }
         let mut wake = false;
         for ev in &events {
             if ev.event_type == EV_KEY && ev.value == 1 {
                 wake = true;
                 break;
             }
-            if (ev.event_type == EV_REL || ev.event_type == EV_ABS) && ev.value != 0 {
+            if (ev.event_type == EV_REL || ev.event_type == EV_ABS) && ev.value.abs() >= 2 {
                 wake = true;
                 break;
             }

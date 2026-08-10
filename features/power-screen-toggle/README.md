@@ -104,3 +104,9 @@ devices are re-scanned every few seconds so peripherals that connect later
 ignored while the lid is closed. Power-key presses queued during the slow
 panel-recovery wake are detected by their event timestamp and ignored, so a
 wake no longer toggles the screen back off right after it turns on.
+
+After the daemon turns the screen off, pointer wake is ignored for 2 seconds
+(the power key and keyboard still work) and the power-key debounce is reset,
+so pressing power again immediately wakes the screen even if the mouse is
+still being moved; this avoids the "screen turns back on by itself, then the
+power press turns it off again" loop.
