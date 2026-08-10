@@ -62,14 +62,11 @@ third-party dependencies: std only plus a few raw libc FFI declarations).
 Build and install:
 
 ```bash
-cd /home/yangxc/Agent/power-screen-toggle/screen-toggle-rs
+cd screen-toggle-rs
 cargo build --release
 install -m 755 target/release/screen-toggle-daemon /usr/local/sbin/screen-toggle-daemon
 systemctl restart screen-toggle.service
 ```
-
-The original Python script is kept as `screen-toggle-daemon.py.bak` for
-reference and rollback.
 
 All external commands (gdbus / loginctl / udevadm / journalctl) run with a
 hard timeout — D-Bus calls wait at most 5 seconds, then the whole process
