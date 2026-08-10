@@ -6,7 +6,7 @@
 
 ## 特色适配功能
 
-本 fork 附带两个日常适配功能，均包含在本仓库中：
+本 fork 附带三个日常适配功能，均包含在本仓库中：
 
 ### 电源 / 合盖息屏切换
 
@@ -26,6 +26,14 @@
 
 - 文档与源码：[features/charge-control/README.zh-CN.md](features/charge-control/README.zh-CN.md)
 - 在设备上安装：`sudo bash features/charge-control/install.sh`
+
+### OpenLess 语音听写
+
+`features/openless/` 记录了 OpenLess（本地语音听写）在本平板的部署过程：
+安装 arm64 安装包、补装 deb 依赖中缺失的 `libxdo3` 运行库，以及重启
+fcitx5 使 OpenLess 插件加载。
+
+- 文档：[features/openless/README.zh-CN.md](features/openless/README.zh-CN.md)
 
 ## 最新发布
 
@@ -170,6 +178,7 @@ sudo apt install xiaomi-nabu-alsa xiaomi-nabu-firmware
 - `kernel-build-files/` — 额外内核配置和 Debian `postinst`/`postrm` 脚本。
 - `features/power-screen-toggle/` — 电源/合盖息屏切换配套守护进程。
 - `features/charge-control/` — 电池阈值充电守护进程（LN8000，Rust）。
+- `features/openless/` — OpenLess 语音听写部署记录（arm64）。
 - `.github/workflows/build-kernel.yml` — 构建内核 `.deb`/`.tar` 安装包。
 
 ## 旧版 README

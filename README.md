@@ -6,7 +6,7 @@ Linux kernel and modules for the Xiaomi Pad 5 (nabu). This release is based on t
 
 ## Featured adaptations
 
-This fork adds two daily-use adaptations for the pad, both included in this repository:
+This fork adds three daily-use adaptations for the pad, all included in this repository:
 
 ### Power / lid screen toggle
 
@@ -27,6 +27,14 @@ for long periods.
 
 - Docs & source: [features/charge-control/](features/charge-control/)
 - Install on the device: `sudo bash features/charge-control/install.sh`
+
+### OpenLess voice dictation
+
+`features/openless/` documents the deployment of OpenLess (local voice
+dictation) on this pad: installing the arm64 package, the missing `libxdo3`
+runtime dependency, and restarting fcitx5 so the OpenLess plugin loads.
+
+- Docs: [features/openless/](features/openless/)
 
 ## Latest release
 
@@ -166,6 +174,7 @@ sudo apt install xiaomi-nabu-alsa xiaomi-nabu-firmware
 - `kernel-build-files/` — extra kernel config and Debian `postinst`/`postrm` scripts.
 - `features/power-screen-toggle/` — companion daemon for power/lid screen toggle.
 - `features/charge-control/` — battery threshold charging daemon (LN8000, Rust).
+- `features/openless/` — OpenLess voice-dictation deployment notes (arm64).
 - `.github/workflows/build-kernel.yml` — builds the kernel `.deb`/`.tar` package.
 
 ## Older README
