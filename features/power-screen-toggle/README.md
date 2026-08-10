@@ -13,8 +13,8 @@ Changes made on this machine (Ubuntu 26.04, GNOME Wayland):
        15 s auto-suspend countdown
    * lid close → screen off + 30 min auto-suspend countdown
    * lid open → screen on and cancels the countdown
-   * any key press while the screen is dark → screen on (keyboard wake) and
-     cancels the countdown
+   * any key press, mouse movement/click or touchpad gesture while the
+     screen is dark → screen on (wake) and cancels the countdown
    * when a countdown expires without the system suspending, the daemon runs
      `systemctl suspend`; after wake it resets the countdown state and turns
      the screen back on
