@@ -1,5 +1,7 @@
 # xiaomi-nabu — Kernel 6.14.11 (audio fixes)
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Linux kernel and modules for the Xiaomi Pad 5 (nabu). This release is based on the stable **6.14.11** kernel with audio fixes.
 
 ## Featured adaptations
@@ -168,4 +170,5 @@ sudo apt install xiaomi-nabu-alsa xiaomi-nabu-firmware
 
 ## Older README
 
-The previous full installation guide (partitioning, flashing Ubuntu, bootloader setup) is still available here: [README-legacy.md](README-legacy.md)
+The previous full installation guide (partitioning, flashing Ubuntu, bootloader setup) is still available here:
+[English](README-legacy.md) · [简体中文](README-legacy.zh-CN.md)

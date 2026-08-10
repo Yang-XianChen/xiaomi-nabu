@@ -1,5 +1,7 @@
 # Power / Lid Switch → Screen Toggle
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 A small companion daemon that turns the power button and lid switch on a
 Linux tablet / laptop into display controls: short-press power toggles the
 screen, lid close turns it off, lid open turns it on, and keyboard / mouse /

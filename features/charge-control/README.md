@@ -1,5 +1,7 @@
 # charge-control：基于电量的充电控制
 
+[English](README.en.md) | [简体中文](README.md)
+
 `features/charge-control/` 是配套的日常功能：守护进程按电池电量自动控制
 LIONSEMI LN8000 充电芯片，避免长时间满电充电。
 

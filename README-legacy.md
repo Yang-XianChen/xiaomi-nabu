@@ -1,4 +1,7 @@
 # Ubuntu Linux on Xiaomi Pad 5 (nabu) - Installation Guide
+
+[English](README-legacy.md) | [简体中文](README-legacy.zh-CN.md)
+
 ![Ubuntu Linux on the Xiaomi Pad 5 (nabu)](ubuntu_resolute.png)
 ### ⚠️ Disclaimer
 *   **Read the instructions once completely before starting the installation process.**

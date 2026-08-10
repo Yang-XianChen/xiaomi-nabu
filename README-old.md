@@ -1,4 +1,7 @@
 # xiaomi-nabu
+
+[English](README-old.md) | [简体中文](README-old.zh-CN.md)
+
 Linux disk images, kernels and scripts for the Xiaomi Pad 5 tablet (codename: nabu).
 
 # NEWS
