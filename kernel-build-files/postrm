@@ -21,7 +21,7 @@ if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
 
     # 4. Format the EFI filename to match the one created in postinst
     CLEAN_KVER="${KVER//-xiaomi-nabu-tmm/}"
-    TARGET_EFI="${CLEAN_KVER}-${ROOT_LABEL}.efi"
+    TARGET_EFI="${CLEAN_KVER}.efi"
 
     # 5. Attempt to mount ESP
     ESP_PART="/dev/disk/by-partlabel/esp"

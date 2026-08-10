@@ -19,8 +19,8 @@ fi
 
 # 3. Format the EFI filename and command line
 CLEAN_KVER="${KVER//-xiaomi-nabu-tmm/}"
-OUTPUT_EFI="${CLEAN_KVER}-${ROOT_LABEL}.efi"
-CMDLINE="root=PARTLABEL=$ROOT_LABEL ro fw_devlink=permissive"
+OUTPUT_EFI="${CLEAN_KVER}.efi"
+CMDLINE="root=PARTLABEL=$ROOT_LABEL rw fw_devlink=permissive"
 
 BOOT_DIR="/boot"
 KERNEL_IMG="$BOOT_DIR/vmlinuz-$KVER"

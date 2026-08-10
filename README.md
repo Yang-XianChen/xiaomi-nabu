@@ -2,26 +2,29 @@
 
 Linux kernel and modules for the Xiaomi Pad 5 (nabu). This release is based on the stable **6.14.11** kernel with audio fixes.
 
-## Latest release
+## Latest releases
 
-- Kernel: `6.14.11-nabu-tmm+`
-- Package: `xiaomi-nabu-linux-6.14_6.14.11-nabu-tmm+_arm64.deb`
+- **Audio-fixes kernel (recommended for testing):** `6.14.11-xiaomi-nabu-tmm-audio-fixes`
+  - Independent boot entry: `6.14.11-audio-fixes`
+  - Package: `xiaomi-nabu-linux-6.14-audio-fixes_6.14.11-xiaomi-nabu-tmm-audio-fixes_arm64.deb`
+- **Original 6.14.11 kernel:** `6.14.11-nabu-tmm+`
+  - Package: `xiaomi-nabu-linux-6.14_6.14.11-nabu-tmm+_arm64.deb`
 - Download: <https://github.com/Yang-XianChen/xiaomi-nabu/releases/latest>
 
-## Apply the new kernel
+## Apply the audio-fixes kernel
 
 On your Xiaomi Pad 5 Ubuntu system:
 
 ```bash
 # 1. Download the package
-curl -L -o xiaomi-nabu-linux-6.14.deb \
-  https://github.com/Yang-XianChen/xiaomi-nabu/releases/latest/download/xiaomi-nabu-linux-6.14_6.14.11-nabu-tmm+_arm64.deb
+curl -L -o xiaomi-nabu-linux-6.14-audio-fixes.deb \
+  https://github.com/Yang-XianChen/xiaomi-nabu/releases/latest/download/xiaomi-nabu-linux-6.14-audio-fixes_6.14.11-xiaomi-nabu-tmm-audio-fixes_arm64.deb
 
 # 2. Install it
-sudo apt install ./xiaomi-nabu-linux-6.14.deb
-# or: sudo dpkg -i xiaomi-nabu-linux-6.14.deb
+sudo apt install ./xiaomi-nabu-linux-6.14-audio-fixes.deb
+# or: sudo dpkg -i xiaomi-nabu-linux-6.14-audio-fixes.deb
 
-# 3. Reboot
+# 3. Reboot and select "6.14.11-audio-fixes" in the boot menu
 sudo reboot
 ```
 
@@ -29,28 +32,30 @@ After reboot, verify the running kernel:
 
 ```bash
 uname -r
-# expected output: 6.14.11-nabu-tmm
+# expected output: 6.14.11-xiaomi-nabu-tmm-audio-fixes
 ```
 
 ### What happens during installation
 
+The audio-fixes package uses a different package name and version (`xiaomi-nabu-linux-6.14-audio-fixes`), so it **does not overwrite** the original `xiaomi-nabu-linux-6.14` package.
+
 The package's `postinst` script:
 
-1. Builds a new UKI EFI file for this kernel.
-2. Mounts the ESP partition and copies the new `.efi` file to `EFI/ubuntu/`.
+1. Builds a new UKI EFI file (`6.14.11-audio-fixes.efi`).
+2. Mounts the ESP partition and copies it to `EFI/ubuntu/`.
 3. Does **not** delete or modify existing boot files.
 
 Old `6.14.11` and `6.17` boot entries remain unchanged; the new kernel appears as an additional entry. If the ESP cannot be mounted, the script falls back to copying the `.efi` file to `/boot` instead.
 
-If you use a boot manager, select the new kernel entry after reboot.
+### Rollback / removal
 
-### Rollback
-
-Keep the previous kernel package installed. If the new kernel does not boot, select the old entry from your boot manager, or reinstall the previous `.deb`:
+Keep the original kernel package installed. If the audio-fixes kernel does not boot, select the old `6.14.11` entry from your boot manager, then remove the new package:
 
 ```bash
-sudo dpkg -i xiaomi-nabu-linux-6.14_<old-version>_arm64.deb
+sudo apt remove xiaomi-nabu-linux-6.14-audio-fixes
 ```
+
+The package's `postrm` removes only `6.14.11-audio-fixes.efi`; the original entries are untouched.
 
 ## Sound fixes and configuration
 
