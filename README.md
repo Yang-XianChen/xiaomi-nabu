@@ -2,6 +2,30 @@
 
 Linux kernel and modules for the Xiaomi Pad 5 (nabu). This release is based on the stable **6.14.11** kernel with audio fixes.
 
+## Featured adaptations
+
+This fork adds two daily-use adaptations for the pad, both included in this repository:
+
+### Power / lid screen toggle
+
+`features/power-screen-toggle/` is an attached daily-use feature for the pad:
+a small daemon that makes the power button and lid switch toggle the display
+instead of powering off/suspending, with keyboard/mouse/touchpad wake, suspend
+countdowns, charging override and automatic panel-recovery cycles.
+
+- Docs & source: [features/power-screen-toggle/](features/power-screen-toggle/)
+- Install on the device: `sudo bash features/power-screen-toggle/install.sh`
+
+### Charge control
+
+`features/charge-control/` is an attached daily-use feature for the pad:
+a small Rust daemon that stops charging above 75% battery and resumes below
+50%, protecting the LN8000 charger and battery from staying at full charge
+for long periods.
+
+- Docs & source: [features/charge-control/](features/charge-control/)
+- Install on the device: `sudo bash features/charge-control/install.sh`
+
 ## Latest release
 
 - **Audio-fixes kernel (recommended for testing):** `6.14.11-xiaomi-nabu-tmm-audio-fixes`
@@ -133,26 +157,6 @@ Make sure the `xiaomi-nabu-alsa` package is installed for the correct ALSA UCM p
 ```bash
 sudo apt install xiaomi-nabu-alsa xiaomi-nabu-firmware
 ```
-
-## Companion feature: power / lid screen toggle
-
-`features/power-screen-toggle/` is an attached daily-use feature for the pad:
-a small daemon that makes the power button and lid switch toggle the display
-instead of powering off/suspending, with keyboard/mouse/touchpad wake, suspend
-countdowns, charging override and automatic panel-recovery cycles.
-
-- Docs & source: [features/power-screen-toggle/](features/power-screen-toggle/)
-- Install on the device: `sudo bash features/power-screen-toggle/install.sh`
-
-## Companion feature: charge control
-
-`features/charge-control/` is an attached daily-use feature for the pad:
-a small Rust daemon that stops charging above 75% battery and resumes below
-50%, protecting the LN8000 charger and battery from staying at full charge
-for long periods.
-
-- Docs & source: [features/charge-control/](features/charge-control/)
-- Install on the device: `sudo bash features/charge-control/install.sh`
 
 ## Repository layout
 
