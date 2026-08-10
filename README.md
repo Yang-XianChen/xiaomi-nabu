@@ -134,10 +134,21 @@ Make sure the `xiaomi-nabu-alsa` package is installed for the correct ALSA UCM p
 sudo apt install xiaomi-nabu-alsa xiaomi-nabu-firmware
 ```
 
+## Companion feature: power / lid screen toggle
+
+`features/power-screen-toggle/` is an attached daily-use feature for the pad:
+a small daemon that makes the power button and lid switch toggle the display
+instead of powering off/suspending, with keyboard/mouse/touchpad wake, suspend
+countdowns, charging override and automatic panel-recovery cycles.
+
+- Docs & source: [features/power-screen-toggle/](features/power-screen-toggle/)
+- Install on the device: `sudo bash features/power-screen-toggle/install.sh`
+
 ## Repository layout
 
 - `patches/` — kernel patches applied by the build workflow.
 - `kernel-build-files/` — extra kernel config and Debian `postinst`/`postrm` scripts.
+- `features/power-screen-toggle/` — companion daemon for power/lid screen toggle.
 - `.github/workflows/build-kernel.yml` — builds the kernel `.deb`/`.tar` package.
 
 ## Older README

@@ -1,0 +1,857 @@
+#!/usr/bin/env python3
+"""Toggle the display backlight from the power button and the lid switch.
+
+Behavior:
+  * Power button (KEY_POWER) short press: toggle screen off/on.
+  * Lid close (SW_LID = 1): turn the screen off.
+  * Lid open  (SW_LID = 0): turn the screen on.
+
+The previous brightness is remembered so the screen returns to the same
+level when it is turned back on.
+"""
+
+import fcntl
+import os
+import select
+import signal
+import struct
+import subprocess
+import threading
+import time
+import re
+from datetime import datetime
+
+EV_KEY = 0x01
+EV_SW = 0x05
+KEY_POWER = 116
+SW_LID = 0
+
+# _IOC(_IOC_READ, 'E', 0x90, sizeof(int)) on 64-bit Linux.
+EVIOCGRAB = 0x40044590
+EVENT_STRUCT = struct.Struct("<qqHHi")  # timeval + type/code/value = 24 bytes
+
+KERNEL_INIT_FAILURE_RE = re.compile(
+    r"FW info is broken"
+    r"|nvt_get_fw_info failed"
+    r"|download firmware failed"
+    r"|failed to initialize panel"
+    r"|Failed to set (pixel format|display on|tear on|exit sleep mode)"
+)
+
+BACKLIGHT_ROOT = "/sys/class/backlight"
+STATE_DIR = "/var/lib/screen-toggle"
+STATE_FILE = os.path.join(STATE_DIR, "last-brightness")
+DISPLAY_SETTLE_SECONDS = 0.7
+
+power_path = None
+lid_path = None
+power_fd = None
+lid_fd = None
+backlight = None
+screen_off = False
+display_blanked = False
+dpms_path = None
+last_toggle = 0.0
+last_lid = None
+running = True
+keyboard_fds = {}
+state_lock = threading.RLock()
+last_own_unblank = 0.0
+
+
+def _signal_handler(signum, frame):
+    """Handle SIGUSR1 (resume) and SIGTERM/SIGINT (shutdown).
+
+    Registered at module load so an early SIGUSR1 (e.g. the resume hook
+    firing right after boot) can never kill the daemon with the default
+    action.  The referenced functions are looked up at call time.
+    """
+    try:
+        if signum == signal.SIGUSR1:
+            on_resume()
+        else:
+            shutdown()
+    except Exception:
+        pass
+
+
+signal.signal(signal.SIGUSR1, _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
+
+
+def log(msg):
+    print("%s %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg), flush=True)
+
+
+def bitmap_has(words, bit):
+    if bit < 0:
+        return False
+    idx = bit // 64
+    return idx < len(words) and bool(words[idx] & (1 << (bit % 64)))
+
+
+def parse_devices():
+    devs = []
+    cur = {}
+    try:
+        fh = open("/proc/bus/input/devices")
+    except OSError as exc:
+        log("cannot open /proc/bus/input/devices: %s" % exc)
+        return devs
+    with fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line.strip():
+                if cur:
+                    devs.append(cur)
+                    cur = {}
+                continue
+            if line.startswith("N: Name="):
+                cur["name"] = line.split("=", 1)[1]
+            elif line.startswith("H: Handlers="):
+                cur["handlers"] = line.split("=", 1)[1].split()
+            elif line.startswith("B: EV="):
+                # /proc/bus/input/devices prints bitmap words from the highest
+                # word down; reverse them so word 0 covers the lowest bits.
+                cur["ev"] = list(reversed([int(w, 16) for w in line.split("=", 1)[1].split()]))
+            elif line.startswith("B: KEY="):
+                cur["key"] = list(reversed([int(w, 16) for w in line.split("=", 1)[1].split()]))
+            elif line.startswith("B: SW="):
+                cur["sw"] = list(reversed([int(w, 16) for w in line.split("=", 1)[1].split()]))
+    if cur:
+        devs.append(cur)
+    return devs
+
+
+def event_node(dev):
+    for handler in dev.get("handlers", []):
+        if handler.startswith("event"):
+            return "/dev/input/" + handler
+    return None
+
+
+def find_devices():
+    """Locate the power-key and lid-switch input devices by capability."""
+    global power_path, lid_path
+    for dev in parse_devices():
+        node = event_node(dev)
+        if not node:
+            continue
+        if power_path is None and bitmap_has(dev.get("key", []), KEY_POWER):
+            power_path = node
+        if (
+            lid_path is None
+            and bitmap_has(dev.get("ev", []), EV_SW)
+            and bitmap_has(dev.get("sw", []), SW_LID)
+        ):
+            lid_path = node
+    return bool(power_path or lid_path)
+
+
+def find_backlight():
+    global backlight
+    try:
+        names = sorted(os.listdir(BACKLIGHT_ROOT))
+    except OSError:
+        names = []
+    for name in names:
+        candidate = os.path.join(BACKLIGHT_ROOT, name)
+        if os.path.isfile(os.path.join(candidate, "brightness")):
+            backlight = candidate
+            return True
+    return False
+
+
+def read_brightness():
+    with open(os.path.join(backlight, "brightness")) as fh:
+        return int(fh.read().strip())
+
+
+def read_max_brightness():
+    try:
+        with open(os.path.join(backlight, "max_brightness")) as fh:
+            return int(fh.read().strip())
+    except OSError:
+        return 2047
+
+
+def write_brightness(value):
+    with open(os.path.join(backlight, "brightness"), "w") as fh:
+        fh.write(str(value))
+
+
+def find_dpms_path():
+    """Locate the connected DRM connector's dpms sysfs file."""
+    global dpms_path
+    if dpms_path and os.path.isfile(dpms_path):
+        return dpms_path
+    best = None
+    try:
+        names = sorted(os.listdir("/sys/class/drm"))
+    except OSError:
+        return None
+    for name in names:
+        if not name.startswith("card") or "-" not in name:
+            continue
+        base = "/sys/class/drm/" + name
+        if not os.path.isfile(base + "/dpms"):
+            continue
+        connected = False
+        try:
+            with open(base + "/status") as fh:
+                connected = fh.read().strip() == "connected"
+        except OSError:
+            pass
+        if connected:
+            dpms_path = base + "/dpms"
+            return dpms_path
+        if best is None:
+            best = base + "/dpms"
+    if best:
+        dpms_path = best
+    return dpms_path
+
+
+def read_dpms():
+    """Current DPMS state ('On', 'Off', ...) of the display, or None."""
+    path = find_dpms_path()
+    if not path:
+        return None
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
+def update_display_state():
+    """Keep display_blanked in sync with the compositor's real state.
+
+    GNOME's own idle blanking also sets PowerSaveMode=1, so our screen_off
+    flag alone is not enough to know whether the display is dark. This runs
+    in a background poll loop; using the last polled value avoids the race
+    where the power press itself makes the compositor unblank before we
+    decide what to do.
+    """
+    global display_blanked
+    state = read_dpms()
+    if state is not None:
+        display_blanked = state != "On"
+
+
+def poll_display_loop():
+    global display_blanked, screen_off
+    last_blanked = None
+    while running:
+        try:
+            update_display_state()
+            if last_blanked is not None and last_blanked and not display_blanked:
+                if time.time() - last_own_unblank > 3.0:
+                    if screen_off:
+                        log("display unblanked externally; turning screen on")
+                        turn_on()
+                    else:
+                        log("display unblanked externally; refreshing input devices")
+                        refresh_pointer_devices(POINTER_PROPS_TOUCH)
+                        threading.Thread(
+                            target=refresh_pointer_devices,
+                            args=(POINTER_PROPS_OTHER,),
+                            daemon=True,
+                        ).start()
+            last_blanked = display_blanked
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+
+def screen_visibly_on():
+    """True if the panel is actually showing content (not blanked/dark)."""
+    if display_blanked:
+        return False
+    if backlight is not None:
+        try:
+            return read_brightness() > 0
+        except OSError:
+            pass
+    return True
+
+
+def save_state(value):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w") as fh:
+            fh.write(str(value) + "\n")
+        os.replace(tmp, STATE_FILE)
+    except OSError as exc:
+        log("cannot save state: %s" % exc)
+
+
+def load_state():
+    try:
+        with open(STATE_FILE) as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return -1
+
+
+def show_session(sid):
+    """Return a dict of logind properties for a session."""
+    result = {}
+    try:
+        out = subprocess.run(
+            ["loginctl", "show-session", sid],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except Exception:
+        return result
+    for line in out.splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            result[key] = value
+    return result
+
+
+def graphical_session():
+    """Return (username, uid) of the active graphical user session, or None."""
+    try:
+        out = subprocess.run(
+            ["loginctl", "list-sessions", "--no-legend"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except Exception:
+        return None
+    for line in out.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        info = show_session(parts[0])
+        if (
+            info.get("Class") == "user"
+            and info.get("Active") == "yes"
+            and info.get("Type") in ("wayland", "x11")
+        ):
+            try:
+                uid = int(info.get("User", -1))
+            except (TypeError, ValueError):
+                return None
+            name = info.get("Name")
+            if name and uid > 0:
+                return name, uid
+            return None
+    return None
+
+
+def set_power_save(on):
+    """Blank/unblank the display through the compositor.
+
+    Sets org.gnome.Mutter.DisplayConfig.PowerSaveMode, the same path the
+    compositor uses for idle blanking. With PowerSaveMode=1 the DRM connector
+    is disabled (DPMS off), so the panel stops showing content entirely
+    instead of only dimming the backlight. Returns True on success; on
+    failure (e.g. no graphical session) the caller falls back to
+    backlight-only handling.
+    """
+    session = graphical_session()
+    if session is None:
+        return False
+    username, uid = session
+    env = dict(os.environ)
+    env["XDG_RUNTIME_DIR"] = "/run/user/%d" % uid
+    env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/user/%d/bus" % uid
+    cmd = [
+        "runuser", "-u", username, "--",
+        "gdbus", "call", "--session",
+        "--dest", "org.gnome.Mutter.DisplayConfig",
+        "--object-path", "/org/gnome/Mutter/DisplayConfig",
+        "--method", "org.freedesktop.DBus.Properties.Set",
+        "org.gnome.Mutter.DisplayConfig", "PowerSaveMode",
+        "<1>" if on else "<0>",
+    ]
+    try:
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=5)
+    except Exception as exc:
+        log("PowerSaveMode(%s) error: %s" % (on, exc))
+        return False
+    if result.returncode != 0:
+        log("PowerSaveMode(%s) failed: %s" % (on, result.stderr.strip()))
+        return False
+    return True
+
+
+def _compositor_env():
+    session = graphical_session()
+    if session is None:
+        return None
+    username, uid = session
+    env = dict(os.environ)
+    env["XDG_RUNTIME_DIR"] = "/run/user/%d" % uid
+    env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/user/%d/bus" % uid
+    return username, env
+
+
+def get_compositor_backlight_info():
+    """Return (serial, value) of the Mutter Backlight property, or None."""
+    session = _compositor_env()
+    if session is None:
+        return None
+    username, env = session
+    cmd = [
+        "runuser", "-u", username, "--",
+        "gdbus", "call", "--session",
+        "--dest", "org.gnome.Mutter.DisplayConfig",
+        "--object-path", "/org/gnome/Mutter/DisplayConfig",
+        "--method", "org.freedesktop.DBus.Properties.Get",
+        "org.gnome.Mutter.DisplayConfig", "Backlight",
+    ]
+    try:
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    serial_match = re.search(r"uint32 (\d+)", result.stdout)
+    value_match = re.search(r"'value': <(\d+)>", result.stdout)
+    if not serial_match or not value_match:
+        return None
+    serial = int(serial_match.group(1))
+    value = int(value_match.group(1))
+    return (serial, value) if value > 0 else None
+
+
+def best_user_brightness():
+    """Return the most trustworthy user-set brightness value.
+
+    Mutter's Backlight property can be stale/minimum (20) after direct sysfs
+    writes, while the state file keeps the real value from the last cycle.
+    Prefer the property only when it is above the hardware minimum.
+    """
+    prop = get_compositor_brightness()
+    state = load_state()
+    if prop is not None and prop > 20:
+        return prop
+    if state is not None and state > 20:
+        return state
+    if prop is not None and prop > 0:
+        return prop
+    return state
+
+
+def get_compositor_brightness():
+    """Return the brightness value GNOME Settings shows, or None.
+
+    GNOME's idle-dim temporarily lowers the sysfs brightness before blanking,
+    but the Mutter DisplayConfig.Backlight property keeps the user-set value.
+    """
+    info = get_compositor_backlight_info()
+    return info[1] if info else None
+
+
+def set_compositor_brightness(value):
+    """Set brightness through Mutter so its Backlight property stays in sync."""
+    session = _compositor_env()
+    if session is None:
+        return False
+    username, env = session
+    info = get_compositor_backlight_info()
+    if info is None:
+        return False
+    serial = info[0]
+    connector = "DSI-1"
+    dpms = find_dpms_path()
+    if dpms:
+        connector = os.path.basename(os.path.dirname(dpms)).split("-", 1)[-1]
+    cmd = [
+        "runuser", "-u", username, "--",
+        "gdbus", "call", "--session",
+        "--dest", "org.gnome.Mutter.DisplayConfig",
+        "--object-path", "/org/gnome/Mutter/DisplayConfig",
+        "--method", "org.gnome.Mutter.DisplayConfig.SetBacklight",
+        str(serial), connector, str(value),
+    ]
+    try:
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=5)
+    except Exception as exc:
+        log("SetBacklight error: %s" % exc)
+        return False
+    if result.returncode != 0:
+        log("SetBacklight failed: %s" % result.stderr.strip())
+        return False
+    return True
+
+
+POINTER_PROPS_TOUCH = ("ID_INPUT_TOUCHSCREEN", "ID_INPUT_TABLET")
+POINTER_PROPS_OTHER = ("ID_INPUT_MOUSE", "ID_INPUT_TOUCHPAD", "ID_INPUT_POINTINGSTICK")
+
+
+def find_pointer_events(props):
+    """Return /dev/input event names matching one of the given udev props."""
+    events = []
+    try:
+        names = sorted(os.listdir("/sys/class/input"))
+    except OSError:
+        return events
+    for name in names:
+        if not name.startswith("event"):
+            continue
+        try:
+            out = subprocess.run(
+                ["udevadm", "info", "-q", "property", "-n", "/dev/input/" + name],
+                capture_output=True, text=True, timeout=5,
+            ).stdout
+        except Exception:
+            continue
+        for line in out.splitlines():
+            if "=" in line:
+                key, _, value = line.partition("=")
+                if key in props and value == "1":
+                    events.append(name)
+                    break
+    return events
+
+
+def refresh_pointer_devices(props):
+    """Re-add input devices so the compositor re-opens / re-maps them.
+
+    After the display is re-enabled, mutter can keep a stale touchscreen
+    mapping (e.g. portrait axes on a landscape screen). Simulating a
+    remove+add makes libinput/mutter re-open the devices and recompute the
+    mapping. Touch/pen devices are refreshed before the backlight comes back;
+    other pointers (mice, touchpads) are refreshed in the background after
+    the screen is visible so they do not delay screen-on.
+    """
+    events = find_pointer_events(props)
+    if not events:
+        return
+    for evname in events:
+        log("refreshing input device %s" % evname)
+        for action in ("remove", "add"):
+            try:
+                subprocess.run(
+                    ["udevadm", "trigger", "--action=" + action, "--sysname", evname],
+                    capture_output=True, text=True, timeout=5,
+                )
+            except Exception as exc:
+                log("udevadm trigger %s %s failed: %s" % (action, evname, exc))
+            time.sleep(0.05)
+    try:
+        subprocess.run(["udevadm", "settle", "--timeout=3"],
+                       capture_output=True, text=True, timeout=10)
+    except Exception:
+        pass
+
+
+
+
+def find_keyboard_paths():
+    """Return /dev/input paths of real keyboard devices."""
+    paths = []
+    try:
+        names = sorted(os.listdir("/sys/class/input"))
+    except OSError:
+        return paths
+    for name in names:
+        if not name.startswith("event"):
+            continue
+        try:
+            out = subprocess.run(
+                ["udevadm", "info", "-q", "property", "-n", "/dev/input/" + name],
+                capture_output=True, text=True, timeout=5,
+            ).stdout
+        except Exception:
+            continue
+        props = {}
+        for line in out.splitlines():
+            if "=" in line:
+                key, _, value = line.partition("=")
+                props[key] = value
+        if props.get("ID_INPUT_KEYBOARD") == "1":
+            paths.append("/dev/input/" + name)
+    return paths
+
+
+def open_keyboard_devices():
+    global keyboard_fds
+    for path in find_keyboard_paths():
+        if path in keyboard_fds:
+            continue
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            keyboard_fds[path] = fd
+            log("watching keyboard %s" % path)
+        except OSError as exc:
+            log("cannot open keyboard %s: %s" % (path, exc))
+
+
+def handle_keyboard_event(fd):
+    """Wake the screen on any key press when the display is dark."""
+    while True:
+        try:
+            data = os.read(fd, EVENT_STRUCT.size)
+        except BlockingIOError:
+            return
+        except OSError:
+            for path, cur_fd in list(keyboard_fds.items()):
+                if cur_fd == fd:
+                    log("keyboard device %s disappeared" % path)
+                    del keyboard_fds[path]
+            return
+        if len(data) != EVENT_STRUCT.size:
+            continue
+        _, _, etype, code, value = EVENT_STRUCT.unpack(data)
+        if etype == EV_KEY and value == 1 and not screen_visibly_on():
+            log("keyboard wake")
+            turn_on()
+
+def kernel_init_failed_since(epoch):
+    """Return True if the kernel reported a display/touch init failure after
+    the given unix timestamp.
+
+    The Novatek touch controller (NVT-ts-spi) shares the same power/reset path
+    as the DSI panel. When a wake-up does not settle, its firmware reload is
+    the part that logs an error; the same bad state is what leaves the panel
+    stuck on a persistent glitch until another blank/unblank cycle resets it.
+    """
+    since = datetime.fromtimestamp(epoch).isoformat(sep=" ", timespec="milliseconds")
+    try:
+        out = subprocess.run(
+            ["journalctl", "-k", "--since", since, "--no-pager", "-o", "short"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except Exception:
+        return False
+    return bool(KERNEL_INIT_FAILURE_RE.search(out))
+
+
+def turn_off():
+    with state_lock:
+        _turn_off()
+
+
+def _turn_off():
+    global screen_off, display_blanked
+    if backlight is None:
+        return
+    if screen_off and display_blanked and read_brightness() == 0:
+        return  # already fully off
+    preferred = best_user_brightness()
+    set_power_save(True)
+    current = preferred or read_brightness()
+    if current > 0:
+        save_state(current)
+    try:
+        write_brightness(0)
+    except OSError as exc:
+        log("failed to turn off backlight: %s" % exc)
+        return
+    screen_off = True
+    display_blanked = True
+    log("screen off")
+
+
+def turn_on():
+    with state_lock:
+        _turn_on()
+
+
+def _turn_on():
+    global screen_off, display_blanked, last_own_unblank
+    if backlight is None:
+        return
+    if not screen_off and not display_blanked and read_brightness() > 0:
+        return  # already fully on
+    last_own_unblank = time.time()
+    preferred = best_user_brightness()
+    current = read_brightness()
+    if current > 0:
+        # Keep the panel dark while the display link re-initializes, so a
+        # glitchy first frame (花屏) is never shown with the backlight on.
+        # Do not save here: this may be GNOME idle-dim's temporary value,
+        # and saving it would overwrite the user's real brightness.
+        try:
+            write_brightness(0)
+        except OSError as exc:
+            log("failed to dim backlight before wake: %s" % exc)
+            return
+    if set_power_save(False):
+        init_start = time.time()
+        time.sleep(DISPLAY_SETTLE_SECONDS)  # let the DSI panel / touch controller settle
+        if kernel_init_failed_since(init_start):
+            log("display/touch init reported failure; retrying blank/unblank once")
+            set_power_save(True)
+            time.sleep(DISPLAY_SETTLE_SECONDS)
+            init_start = time.time()
+            set_power_save(False)
+            time.sleep(DISPLAY_SETTLE_SECONDS)
+            if kernel_init_failed_since(init_start):
+                log("recovery cycle still reported failure; restoring brightness anyway")
+    # Re-add pointer/touch devices while the panel is still dark, so the
+    # first tap/click after the screen becomes visible is not lost during
+    # device re-enumeration.
+    refresh_pointer_devices(POINTER_PROPS_TOUCH)
+    maximum = read_max_brightness()
+    value = preferred
+    if value is None:
+        value = load_state()
+    if value is None or value <= 0 or value > maximum:
+        value = maximum
+    if value > 20:
+        save_state(value)
+    try:
+        write_brightness(value)
+    except OSError as exc:
+        log("failed to turn on backlight: %s" % exc)
+        return
+    time.sleep(0.1)
+    if read_brightness() != value:
+        log("brightness did not stick (%s), retrying once" % read_brightness())
+        try:
+            write_brightness(value)
+        except OSError as exc:
+            log("failed to retry backlight: %s" % exc)
+    screen_off = False
+    display_blanked = False
+    log("screen on (brightness %s)" % read_brightness())
+    # Other pointer devices do not need to be ready before the screen is
+    # visible; refresh them in the background so screen-on stays fast.
+    threading.Thread(
+        target=refresh_pointer_devices,
+        args=(POINTER_PROPS_OTHER,),
+        daemon=True,
+    ).start()
+    time.sleep(0.5)
+    if read_dpms() != "On":
+        log("compositor re-blanked the display, unblanking again")
+        set_power_save(False)
+        update_display_state()
+
+
+def on_resume():
+    """Called after the system wakes from suspend: restore the backlight and
+    resync our off/on state so the screen is not left black after wake."""
+    global screen_off, display_blanked
+    if backlight is None:
+        return
+    update_display_state()
+    if not screen_visibly_on():
+        screen_off = True
+        turn_on()
+    else:
+        screen_off = False
+    log("resume: backlight state resynced")
+
+
+def handle_event(fd):
+    global power_fd, lid_fd, last_lid, last_toggle
+    while True:
+        try:
+            data = os.read(fd, EVENT_STRUCT.size)
+        except BlockingIOError:
+            return
+        except OSError:
+            log("input device %s disappeared" % fd)
+            if fd == power_fd:
+                power_fd = None
+            if fd == lid_fd:
+                lid_fd = None
+            return
+        if len(data) != EVENT_STRUCT.size:
+            continue
+        _, _, etype, code, value = EVENT_STRUCT.unpack(data)
+        if fd == power_fd:
+            if etype == EV_KEY and code == KEY_POWER and value == 1:
+                now = time.time()
+                if now - last_toggle < 1.0:
+                    log("power key ignored (debounce)")
+                    continue
+                last_toggle = now
+                log("power key pressed")
+                if screen_visibly_on():
+                    turn_off()
+                else:
+                    turn_on()
+        elif fd == lid_fd:
+            if etype == EV_SW and code == SW_LID and value != last_lid:
+                last_lid = value
+                if value == 1:
+                    log("lid closed")
+                    turn_off()
+                elif value == 0:
+                    log("lid opened")
+                    turn_on()
+
+
+def setup():
+    global power_fd, lid_fd, screen_off
+    if not find_devices():
+        log("waiting for input devices (power key / lid switch)")
+    if backlight is None:
+        if find_backlight():
+            log("using backlight %s" % backlight)
+        else:
+            log("no backlight device found, screen toggling disabled")
+    if backlight is not None:
+        screen_off = read_brightness() == 0
+    if power_path is not None and power_fd is None:
+        try:
+            power_fd = os.open(power_path, os.O_RDONLY | os.O_NONBLOCK)
+            log("watching power key %s" % power_path)
+        except OSError as exc:
+            log("cannot open power device %s: %s" % (power_path, exc))
+            power_fd = None
+    if lid_path is not None and lid_fd is None:
+        try:
+            lid_fd = os.open(lid_path, os.O_RDONLY | os.O_NONBLOCK)
+            log("watching lid switch %s" % lid_path)
+        except OSError as exc:
+            log("cannot open lid device %s: %s" % (lid_path, exc))
+            lid_fd = None
+    if not keyboard_fds:
+        open_keyboard_devices()
+
+
+def shutdown():
+    global running
+    running = False
+    for fd in (power_fd, lid_fd):
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    for fd in list(keyboard_fds.values()):
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    keyboard_fds.clear()
+    log("daemon stopped")
+
+
+def main():
+    global running
+    log("screen-toggle daemon starting")
+    threading.Thread(target=poll_display_loop, daemon=True).start()
+    while running:
+        if power_fd is None or lid_fd is None or backlight is None or not keyboard_fds:
+            setup()
+        fds = [fd for fd in (power_fd, lid_fd) if fd is not None] + list(keyboard_fds.values())
+        if not fds:
+            time.sleep(2)
+            continue
+        try:
+            readable, _, _ = select.select(fds, [], [], 2)
+        except OSError:
+            continue
+        for fd in readable:
+            if fd == power_fd or fd == lid_fd:
+                handle_event(fd)
+            else:
+                handle_keyboard_event(fd)
+    shutdown()
+
+
+if __name__ == "__main__":
+    main()
