@@ -101,9 +101,10 @@ This kernel includes these audio fixes:
 **Automatic configuration:** the `xiaomi-nabu-linux-6.14-audio-fixes` package applies these settings automatically on install:
 
 - Writes `options q6asm nabu_stream_gain_q13=4106` to `/etc/modprobe.d/nabu-audio.conf`
-- Sets `default-fragment-size-msec = 256` in `/etc/pulse/daemon.conf`
+- Pins the audio graph quantum to `960` frames (20 ms @ 48 kHz) via `/etc/pipewire/pipewire.conf.d/99-nabu-audio-buffer.conf`
+- Enables a large ALSA hardware ring (period 3072 / buffer 24576 = **512 ms**) via `/etc/wireplumber/wireplumber.conf.d/51-nabu-alsa-buffers.conf`
 
-Both are restored to their previous state when the package is removed or purged.
+All are restored to their previous state when the package is removed or purged.
 
 ### Verify audio modules
 
@@ -135,23 +136,52 @@ If you still hear clipping, lower the value further (e.g. `3500` ≈ -7.4 dB) or
 
 ### Audio buffer configuration
 
-If you hear crackling, dropouts or underruns, increase the audio buffer. Edit `/etc/pulse/daemon.conf` (or `~/.config/pulse/daemon.conf`):
+If you hear crackling, dropouts or underruns, apply the validated fix below. Ubuntu 24.04+ ships PipeWire, which **does not read PulseAudio's `daemon.conf`** — and on this hardware the SPA ALSA plugin's default batch mode only negotiates a 512/4096-frame (85 ms) ring, which underruns under stream churn (e.g. rapid terminal-bell beeps). The fix has two parts:
+
+1. Pin the graph quantum (per-user, `~/.config/pipewire/pipewire.conf.d/99-nabu-quantum.conf`):
 
 ```ini
-default-fragments = 4
-default-fragment-size-msec = 256
+context.properties = {
+    default.clock.quantum = 960
+    default.clock.min-quantum = 960
+    default.clock.max-quantum = 960
+}
 ```
 
-Available values: `128` ms, `256` ms, `512` ms. `256` ms or `512` ms are recommended for stability.
+2. Force a large ALSA hardware ring via WirePlumber device rules (`~/.config/wireplumber/wireplumber.conf.d/51-nabu-alsa-buffers.conf`):
 
-**Note:** a larger buffer makes audio more stable but also increases audio latency.
+```ini
+monitor.alsa.rules = [
+  {
+    matches = [ { node.name = "~alsa_output.*" } ]
+    actions = {
+      update-props = {
+        api.alsa.disable-tsched = false
+        api.alsa.disable-batch  = true
+        api.alsa.period-size    = 3072
+        api.alsa.period-num     = 8
+        api.alsa.headroom       = 3072
+      }
+    }
+  }
+]
+```
 
-Restart the audio server (or reboot):
+Verify the hardware ring (should show `period_size: 3072` / `buffer_size: 24576` while playing):
 
 ```bash
-pulseaudio -k
-# or, on PipeWire systems:
-systemctl --user restart pipewire-pulse
+pw-play /usr/share/sounds/freedesktop/stereo/bell.oga & sleep 1
+cat /proc/asound/card1/pcm0p/sub0/hw_params
+```
+
+`default.clock.quantum` is the graph tick in frames at 48 kHz: `960` = 20 ms, `2048` ≈ 43 ms, `4096` ≈ 85 ms.
+
+**Note:** a larger ring makes audio more stable but also increases audio latency.
+
+Restart the audio services (or reboot):
+
+```bash
+systemctl --user restart pipewire pipewire-pulse wireplumber
 ```
 
 ### If there is no sound at all

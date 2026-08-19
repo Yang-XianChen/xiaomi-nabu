@@ -79,20 +79,47 @@ fi
 CONFIG_DIR="/var/lib/xiaomi-nabu-linux-6.14-audio-fixes"
 mkdir -p "$CONFIG_DIR"
 
-PULSE_CONF="/etc/pulse/daemon.conf"
-if [ -f "$PULSE_CONF" ] && ! grep -q '^default-fragment-size-msec[[:space:]]*=[[:space:]]*256' "$PULSE_CONF"; then
-    if [ ! -f "$CONFIG_DIR/daemon.conf.orig" ]; then
-        cp -a "$PULSE_CONF" "$CONFIG_DIR/daemon.conf.orig"
-    fi
-    if grep -q '^default-fragment-size-msec' "$PULSE_CONF"; then
-        sed -i 's/^default-fragment-size-msec.*/default-fragment-size-msec = 256/' "$PULSE_CONF"
-    elif grep -qE '^[;#][[:space:]]*default-fragment-size-msec' "$PULSE_CONF"; then
-        sed -i -E 's/^[;#][[:space:]]*default-fragment-size-msec.*/default-fragment-size-msec = 256/' "$PULSE_CONF"
-    else
-        echo 'default-fragment-size-msec = 256' >> "$PULSE_CONF"
-    fi
-    touch "$CONFIG_DIR/pulse.modified"
-    echo "Applied audio buffer: default-fragment-size-msec = 256"
+# Ubuntu ships PipeWire, which does not read PulseAudio's daemon.conf.
+# Pin the graph quantum to 960 frames (20 ms @ 48 kHz), the DSP-fragment-aligned
+# value validated in the 2026-08-07 audio fix archive.
+PW_CONF="/etc/pipewire/pipewire.conf.d/99-nabu-audio-buffer.conf"
+if [ ! -f "$PW_CONF" ]; then
+    mkdir -p /etc/pipewire/pipewire.conf.d
+    cat > "$PW_CONF" <<'EOF'
+context.properties = {
+    default.clock.quantum = 960
+    default.clock.min-quantum = 960
+    default.clock.max-quantum = 960
+}
+EOF
+    touch "$CONFIG_DIR/nabu-pipewire.created"
+    echo "Applied audio graph quantum: 960 frames (20 ms @ 48 kHz)"
+fi
+
+# The actual fix for beep-churn XRUNs: let the SPA ALSA plugin negotiate a
+# large hardware ring (period 3072 / buffer 24576 = 512 ms) instead of the
+# batch-mode default 512/4096. Applied via WirePlumber device rules.
+WP_CONF="/etc/wireplumber/wireplumber.conf.d/51-nabu-alsa-buffers.conf"
+if [ ! -f "$WP_CONF" ]; then
+    mkdir -p /etc/wireplumber/wireplumber.conf.d
+    cat > "$WP_CONF" <<'EOF'
+monitor.alsa.rules = [
+  {
+    matches = [ { node.name = "~alsa_output.*" } ]
+    actions = {
+      update-props = {
+        api.alsa.disable-tsched = false
+        api.alsa.disable-batch  = true
+        api.alsa.period-size    = 3072
+        api.alsa.period-num     = 8
+        api.alsa.headroom       = 3072
+      }
+    }
+  }
+]
+EOF
+    touch "$CONFIG_DIR/nabu-wireplumber.created"
+    echo "Applied ALSA hardware buffer: period 3072 / buffer 24576 (512 ms @ 48 kHz)"
 fi
 
 MODPROBE_CONF="/etc/modprobe.d/nabu-audio.conf"

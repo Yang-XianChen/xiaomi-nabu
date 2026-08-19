@@ -54,17 +54,23 @@ if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
 
     # 7. Restore user-space audio configuration
     CONFIG_DIR="/var/lib/xiaomi-nabu-linux-6.14-audio-fixes"
-    if [ -f "$CONFIG_DIR/daemon.conf.orig" ]; then
-        cp -a "$CONFIG_DIR/daemon.conf.orig" /etc/pulse/daemon.conf
-        rm -f "$CONFIG_DIR/daemon.conf.orig"
-        echo "Post-remove: Restored /etc/pulse/daemon.conf"
+    if [ -f "$CONFIG_DIR/nabu-pipewire.created" ]; then
+        rm -f /etc/pipewire/pipewire.conf.d/99-nabu-audio-buffer.conf
+        rmdir /etc/pipewire/pipewire.conf.d 2>/dev/null || true
+        rm -f "$CONFIG_DIR/nabu-pipewire.created"
+        echo "Post-remove: Removed /etc/pipewire/pipewire.conf.d/99-nabu-audio-buffer.conf"
+    fi
+    if [ -f "$CONFIG_DIR/nabu-wireplumber.created" ]; then
+        rm -f /etc/wireplumber/wireplumber.conf.d/51-nabu-alsa-buffers.conf
+        rmdir /etc/wireplumber/wireplumber.conf.d 2>/dev/null || true
+        rm -f "$CONFIG_DIR/nabu-wireplumber.created"
+        echo "Post-remove: Removed /etc/wireplumber/wireplumber.conf.d/51-nabu-alsa-buffers.conf"
     fi
     if [ -f "$CONFIG_DIR/nabu-modprobe.created" ]; then
         rm -f /etc/modprobe.d/nabu-audio.conf
         rm -f "$CONFIG_DIR/nabu-modprobe.created"
         echo "Post-remove: Removed /etc/modprobe.d/nabu-audio.conf"
     fi
-    rm -f "$CONFIG_DIR/pulse.modified"
     rmdir "$CONFIG_DIR" 2>/dev/null || true
 
     # Cleanup temp directory

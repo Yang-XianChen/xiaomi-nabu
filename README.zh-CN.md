@@ -103,9 +103,10 @@ sudo apt remove xiaomi-nabu-linux-6.14-audio-fixes
 **自动配置：** `xiaomi-nabu-linux-6.14-audio-fixes` 包在安装时会自动应用以下设置：
 
 - 向 `/etc/modprobe.d/nabu-audio.conf` 写入 `options q6asm nabu_stream_gain_q13=4106`
-- 在 `/etc/pulse/daemon.conf` 中设置 `default-fragment-size-msec = 256`
+- 通过 `/etc/pipewire/pipewire.conf.d/99-nabu-audio-buffer.conf` 将音频图 quantum 固定为 `960` 帧（48 kHz 下 20 ms）
+- 通过 `/etc/wireplumber/wireplumber.conf.d/51-nabu-alsa-buffers.conf` 启用 ALSA 大硬件环形缓冲（period 3072 / buffer 24576 = **512 ms**）
 
-卸载或清除该包时，两项设置都会恢复为之前的状态。
+卸载或清除该包时，以上设置都会恢复为之前的状态。
 
 ### 验证音频模块
 
@@ -138,24 +139,52 @@ Easy Effects；这可以处理 DSP 路径中与电平相关的削波。
 
 ### 音频缓冲区配置
 
-如果出现爆音、卡顿或欠载，请增大音频缓冲区。编辑 `/etc/pulse/daemon.conf`
-（或 `~/.config/pulse/daemon.conf`）：
+如果出现爆音、卡顿或欠载，请应用以下经验证有效的修复。Ubuntu 24.04+ 使用 PipeWire，**不会读取 PulseAudio 的 `daemon.conf`**——且此硬件上 SPA ALSA 插件默认的 batch 模式只能协商出 512/4096 帧（85 ms）的环形缓冲，在流频繁开关（如快速连续的终端响铃）时会欠载。修复分两部分：
+
+1. 固定图 quantum（用户级，`~/.config/pipewire/pipewire.conf.d/99-nabu-quantum.conf`）：
 
 ```ini
-default-fragments = 4
-default-fragment-size-msec = 256
+context.properties = {
+    default.clock.quantum = 960
+    default.clock.min-quantum = 960
+    default.clock.max-quantum = 960
+}
 ```
 
-可选值：`128` ms、`256` ms、`512` ms。建议使用 `256` ms 或 `512` ms 以保证稳定。
+2. 通过 WirePlumber 设备规则强制 ALSA 大硬件环形缓冲（`~/.config/wireplumber/wireplumber.conf.d/51-nabu-alsa-buffers.conf`）：
 
-**注意：** 缓冲区越大音频越稳定，但延迟也会增加。
+```ini
+monitor.alsa.rules = [
+  {
+    matches = [ { node.name = "~alsa_output.*" } ]
+    actions = {
+      update-props = {
+        api.alsa.disable-tsched = false
+        api.alsa.disable-batch  = true
+        api.alsa.period-size    = 3072
+        api.alsa.period-num     = 8
+        api.alsa.headroom       = 3072
+      }
+    }
+  }
+]
+```
+
+验证硬件环形缓冲（播放时应显示 `period_size: 3072` / `buffer_size: 24576`）：
+
+```bash
+pw-play /usr/share/sounds/freedesktop/stereo/bell.oga & sleep 1
+cat /proc/asound/card1/pcm0p/sub0/hw_params
+```
+
+`default.clock.quantum` 是 48 kHz 下图节拍帧数：`960` = 20 ms，`2048` ≈ 43 ms，`4096` ≈ 85 ms。
+
+**注意：** 环形缓冲越大音频越稳定，但延迟也会增加。
 
 重启音频服务（或重启系统）：
 
 ```bash
-pulseaudio -k
-# 或在 PipeWire 系统上：
-systemctl --user restart pipewire-pulse
+systemctl --user restart pipewire pipewire-pulse wireplumber
 ```
 
 ### 完全没有声音时
